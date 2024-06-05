@@ -28,7 +28,7 @@ def extract_params_from_filename(file_name):
     parts = file_name.replace('.csv', '').split('_')
     return [float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])]
 
-folder_path = 'path_to_your_folder'  # Update this to your folder path
+folder_path = 'training_data'  # Update this to your folder path
 signals, params = load_data_from_folder(folder_path)
 
 # Convert lists to tensors
@@ -44,7 +44,7 @@ dataloader = DataLoader(dataset, batch_size=2, shuffle=True)  # Adjust batch_siz
 class WaveletParamNet(nn.Module):
     def __init__(self):
         super(WaveletParamNet, self).__init__()
-        self.fc1 = nn.Linear(1000, 512)
+        self.fc1 = nn.Linear(signals_tensor.shape[1], 512)
         self.fc2 = nn.Linear(512, 256)
         self.fc3 = nn.Linear(256, 128)
         self.fc4 = nn.Linear(128, 4)  # Assuming we predict 4 parameters
@@ -56,14 +56,51 @@ class WaveletParamNet(nn.Module):
         x = self.fc4(x)  # No activation on output
         return x
 
-# Step 4: Training the Neural Network
+# Step 4: Custom Loss Function with MSE Threshold
+class CustomLoss(nn.Module):
+    def __init__(self, mse_threshold):
+        super(CustomLoss, self).__init__()
+        self.mse_threshold = mse_threshold
+        self.mse_loss = nn.MSELoss()
+
+    def forward(self, outputs, targets):
+        mse = self.mse_loss(outputs, targets)
+        penalty = torch.where(mse > self.mse_threshold, mse - self.mse_threshold, torch.tensor(0.0, device=mse.device))
+        return mse + penalty
+
+# Define your MSE threshold
+mse_threshold = 1e-5
+criterion = CustomLoss(mse_threshold)
+
+# Step 5: Early Stopping
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=1e-6):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = None
+        self.counter = 0
+
+    def step(self, loss):
+        if self.best_loss is None:
+            self.best_loss = loss
+        elif loss < self.best_loss - self.min_delta:
+            self.best_loss = loss
+            self.counter = 0
+        else:
+            self.counter += 1
+        return self.counter >= self.patience
+
+# Initialize early stopping
+early_stopping = EarlyStopping(patience=10, min_delta=1e-6)
+
+# Initialize model, optimizer
 model = WaveletParamNet()
-criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# Training loop
+# Step 6: Training the Neural Network with Early Stopping
 num_epochs = 1000
 for epoch in range(num_epochs):
+    model.train()
     for signals, params in dataloader:
         outputs = model(signals)
         loss = criterion(outputs, params)
@@ -72,16 +109,29 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
 
-    if (epoch + 1) % 100 == 0:
-        print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}')
+    # Validation step
+    model.eval()
+    with torch.no_grad():
+        val_loss = 0
+        for val_signals, val_params in dataloader:  # Using the same dataloader for simplicity
+            val_outputs = model(val_signals)
+            val_loss += criterion(val_outputs, val_params).item()
+        val_loss /= len(dataloader)
 
-# Step 5: Example Prediction
+    print(f'Epoch [{epoch + 1}/{num_epochs}], Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f}')
+
+    if early_stopping.step(val_loss):
+        print(f'Early stopping at epoch {epoch + 1}')
+        break
+
+# Step 7: Example Prediction
 model.eval()
 with torch.no_grad():
     example_signal = signals_tensor[0].unsqueeze(0)  # Use the first signal as an example
     predicted_params = model(example_signal).numpy()
+    print(predicted_params)
     print(predicted_params)  # Use these parameters in your C++ code
 
-# Step 6: Convert PyTorch Model to ONNX (Optional)
-# dummy_input = torch.randn(1, 1000)
+# Step 8: Convert PyTorch Model to ONNX (Optional)
+# dummy_input = torch.randn(1, signals_tensor.shape[1])
 # torch.onnx.export(model, dummy_input, "wavelet_param_net.onnx", input_names=['input'], output_names=['output'])
